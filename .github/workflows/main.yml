@@ -1,0 +1,87 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Собрать Android-проект
+        env:
+          CI: "true"
+        run: |
+          mkdir -p www
+          cp index.html www/
+          for f in manifest.webmanifest icon-192.png icon-512.png; do [ -f "$f" ] && cp "$f" www/ || true; done
+          npm init -y > /dev/null
+          npm install @capacitor/core@6.2.0 @capacitor/cli@6.2.0 @capacitor/android@6.2.0
+          npx cap init "7 ночей" com.nochey.zarplata --web-dir www
+          npx cap add android
+          sed -i 's/android:name=".MainActivity"/android:name=".MainActivity" android:screenOrientation="sensorLandscape"/' android/app/src/main/AndroidManifest.xml
+          sed -i 's#<item name="windowActionBar">false</item>#<item name="windowActionBar">false</item><item name="android:windowFullscreen">true</item>#' android/app/src/main/res/values/styles.xml
+
+      - name: Иконка
+        continue-on-error: true
+        run: |
+          if [ -f icon-512.png ]; then
+          python3 -m pip install --quiet --break-system-packages pillow || python3 -m pip install --quiet pillow
+          python3 - <<'PY'
+          import os, shutil
+          from PIL import Image, ImageDraw, ImageFilter
+          src = Image.open('icon-512.png').convert('RGBA')
+          base = 'android/app/src/main/res'
+          shutil.rmtree(base + '/mipmap-anydpi-v26', ignore_errors=True)
+          for k, s in {'mdpi': 48, 'hdpi': 72, 'xhdpi': 96, 'xxhdpi': 144, 'xxxhdpi': 192}.items():
+              d = f'{base}/mipmap-{k}'
+              os.makedirs(d, exist_ok=True)
+              im = src.resize((s, s), Image.LANCZOS)
+              for n in ('ic_launcher.png', 'ic_launcher_round.png', 'ic_launcher_foreground.png'):
+                  im.save(f'{d}/{n}')
+          for root, _, files in os.walk(base):
+              if 'splash.png' in files:
+                  path = os.path.join(root, 'splash.png')
+                  w, h = Image.open(path).size
+                  bg = Image.new('RGBA', (w, h), (7, 9, 13, 255))
+                  s = int(min(w, h) * 0.4)
+                  m = Image.new('L', (s, s), 0)
+                  ImageDraw.Draw(m).ellipse((s * 0.08, s * 0.08, s * 0.92, s * 0.92), fill=255)
+                  bg.paste(src.resize((s, s), Image.LANCZOS), ((w - s) // 2, (h - s) // 2), m.filter(ImageFilter.GaussianBlur(s * 0.06)))
+                  bg.convert('RGB').save(path)
+          PY
+          fi
+
+      - name: Собрать APK
+        run: |
+          cd android
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+          cp app/build/outputs/apk/debug/app-debug.apk ../7-nochey.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: 7-nochey-apk
+          path: 7-nochey.apk
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: Сборка ${{ github.run_number }}
+          files: 7-nochey.apk
+          make_latest: true
